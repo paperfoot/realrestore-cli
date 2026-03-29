@@ -129,8 +129,8 @@ class TestMPSBackend:
         import torch
         from realrestore_cli.optimizations.mps_backend import get_optimal_dtype
         dtype = get_optimal_dtype()
-        # Research: float32 is faster than float16 on Apple Silicon
-        assert dtype == torch.float32
+        # Float16: float32 full model exceeds 64GB (78.6GB on MPS)
+        assert dtype == torch.float16
 
     def test_hardware_info(self):
         from realrestore_cli.optimizations.mps_backend import get_apple_silicon_info

@@ -64,17 +64,16 @@ def get_dtype(device: str) -> torch.dtype:
     """Select appropriate dtype for device.
 
     Research findings (2026-03-29):
-    - MPS float16 convolutions are FUNDAMENTALLY BROKEN (PyTorch #119108)
-    - Float32 is actually FASTER than float16 on Apple Silicon (18-20s vs 22-25s)
+    - Float32 full model = 78.6GB on MPS — exceeds 64GB, causes swap
+    - Float16 = 19.5GB — fits comfortably with room for activations
+    - Upstream bfloat16 hardcodes patched to use self.dtype
+    - Upstream float64 rope patched to float32
+    - PYTORCH_MPS_PREFER_METAL=1 fixes matmul dtype assertions
     - device_map="mps" silently corrupts weights — must load CPU first
     - enable_model_cpu_offload() is broken on MPS (hardcoded CUDA)
-    - Qwen2-VL on MPS has no working float16 solution (transformers #33399)
-
-    Strategy: Load as float32. Use Quanto INT8 quantization to fit in memory.
-    INT8 weights (~10GB) + float32 compute = ~30GB total, fits in 64GB.
     """
     if device == "mps":
-        return torch.float32
+        return torch.float16
     if device == "cuda":
         return torch.bfloat16
     return torch.float32

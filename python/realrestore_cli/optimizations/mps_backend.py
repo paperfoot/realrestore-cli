@@ -90,11 +90,11 @@ def configure_mps_environment() -> dict[str, str]:
 def get_optimal_dtype() -> torch.dtype:
     """Get optimal dtype for MPS.
 
-    Research finding: float32 is actually FASTER than float16 on Apple
-    Silicon (18-20s vs 22-25s per image). Float16 conv ops are broken
-    on MPS (PyTorch #119108). Use float32 for both correctness and speed.
+    Float16 is required — float32 for the full 39GB model = 78.6GB,
+    exceeds 64GB. With PYTORCH_MPS_PREFER_METAL=1 and patched upstream
+    (no hardcoded bfloat16/float64), float16 works correctly on MPS.
     """
-    return torch.float32
+    return torch.float16
 
 
 def optimize_pipeline(pipe: Any, memory_gb: float = 64.0) -> Any:
