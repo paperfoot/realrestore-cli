@@ -188,9 +188,35 @@ def restore_image(
     steps: int = 28,
     seed: int = 42,
     prompt: str = "",
+    quality: str | None = None,
+    tile: bool = False,
+    tile_size: int = 512,
+    tile_overlap: int = 64,
 ) -> dict[str, Any]:
     """Run image restoration and return metrics."""
     start_time = time.time()
+
+    # Auto-detect degradation type if task is "auto"
+    detected_task = task
+    detection_confidence = 0.0
+    if task == "auto":
+        try:
+            from realrestore_cli.optimizations.auto_detect import auto_detect
+            detection = auto_detect(input_path)
+            detected_task = detection.get("task", "auto")
+            detection_confidence = detection.get("confidence", 0.0)
+        except Exception:
+            detected_task = "auto"
+
+    # Apply quality preset
+    if quality:
+        from realrestore_cli.optimizations.scheduling import QualityPreset, get_scheduler_config
+        try:
+            preset = QualityPreset(quality)
+            config = get_scheduler_config(preset)
+            steps = config.num_steps
+        except (ValueError, KeyError):
+            pass
 
     # Resolve device
     if backend == "auto":
@@ -202,7 +228,7 @@ def restore_image(
 
     # Resolve prompt
     if not prompt:
-        prompt = TASK_PROMPTS.get(task, TASK_PROMPTS["auto"])
+        prompt = TASK_PROMPTS.get(detected_task, TASK_PROMPTS["auto"])
 
     # Load model
     model_path = get_model_path()
@@ -246,7 +272,9 @@ def restore_image(
     return {
         "input": input_path,
         "output": str(out_path),
-        "task": task,
+        "task": detected_task,
+        "task_requested": task,
+        "detection_confidence": round(detection_confidence, 4),
         "backend": device,
         "quantize": quantize,
         "steps": steps,
