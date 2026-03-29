@@ -63,17 +63,16 @@ def get_device() -> str:
 def get_dtype(device: str) -> torch.dtype:
     """Select appropriate dtype for device.
 
-    Research findings (2026-03-29):
-    - Float32 full model = 78.6GB on MPS — exceeds 64GB, causes swap
-    - Float16 = 19.5GB — fits comfortably with room for activations
-    - Upstream bfloat16 hardcodes patched to use self.dtype
-    - Upstream float64 rope patched to float32
-    - PYTORCH_MPS_PREFER_METAL=1 fixes matmul dtype assertions
-    - device_map="mps" silently corrupts weights — must load CPU first
-    - enable_model_cpu_offload() is broken on MPS (hardcoded CUDA)
+    Proven pattern from FLUX.1 community (2026-03-29):
+    - bfloat16 WORKS on MPS with PyTorch 2.10+ (tested and confirmed)
+    - bfloat16 has range up to 3.4e38 (vs float16 max 65504) — no NaN overflow
+    - This is the SAME dtype the model was trained in — zero precision loss
+    - Float16 causes NaN in attention (max 65504 overflows)
+    - Float32 full model = 78.6GB — OOM on 64GB
+    - RoPE computed on CPU with float64 precision (FLUX proven pattern)
     """
     if device == "mps":
-        return torch.float16
+        return torch.bfloat16
     if device == "cuda":
         return torch.bfloat16
     return torch.float32
@@ -173,15 +172,13 @@ def load_pipeline(
         from realrestore_cli.optimizations.mps_backend import configure_mps_environment
         configure_mps_environment()
 
-        # Research-backed MPS strategy:
-        # - Float32 is faster than float16 on Apple Silicon (18-20s vs 22-25s)
-        # - Float16 convolutions are fundamentally broken (PyTorch #119108)
-        # - enable_model_cpu_offload() is broken on MPS (hardcoded CUDA)
-        # - enable_sequential_cpu_offload() causes meta tensor errors
-        # - Upstream pipeline bfloat16 hardcodes are patched to use self.dtype
-        #
-        # We load as float32 on CPU, optionally quantize (INT8 = ~10GB),
-        # then move to MPS. Total ~30GB fits in 64GB.
+        # Proven FLUX community pattern for large DiT models on MPS:
+        # 1. Load as bfloat16 (same as training dtype, no precision loss)
+        # 2. Upcast VAE to float32 (GroupNorm produces NaN in bf16/fp16)
+        # 3. RoPE computed on CPU with float64 (patched in upstream)
+        # 4. Everything on MPS — no CPU offloading needed
+        # Memory: ~20GB bfloat16 weights + 0.6GB VAE float32 + activations
+        pipe.vae = pipe.vae.to(dtype=torch.float32)
         pipe.to(device)
 
     elif device == "cuda":

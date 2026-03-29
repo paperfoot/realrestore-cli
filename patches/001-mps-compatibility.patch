@@ -1,17 +1,26 @@
 diff --git a/diffusers/src/diffusers/models/realrestorer/layers.py b/diffusers/src/diffusers/models/realrestorer/layers.py
-index b9dd921..d41b76e 100644
+index b9dd921..1b2be6c 100644
 --- a/diffusers/src/diffusers/models/realrestorer/layers.py
 +++ b/diffusers/src/diffusers/models/realrestorer/layers.py
-@@ -268,7 +268,8 @@ class MLPEmbedder(nn.Module):
+@@ -268,12 +268,17 @@ class MLPEmbedder(nn.Module):
  def rope(pos, dim: int, theta: int):
      if dim % 2 != 0:
          raise ValueError("RoPE dimension must be even.")
--    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
-+    # Use float32 instead of float64 — MPS doesn't support float64
-+    scale = torch.arange(0, dim, 2, dtype=torch.float32, device=pos.device) / dim
++    # MPS doesn't support float64 — compute RoPE on CPU with float64
++    # precision (proven FLUX pattern), then move result back to device.
++    original_device = pos.device
++    if pos.device.type == "mps":
++        pos = pos.to("cpu")
+     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
      omega = 1.0 / (theta**scale)
      out = torch.einsum("...n,d->...nd", pos, omega)
      out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
+     out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+-    return out.float()
++    return out.float().to(original_device)
+ 
+ 
+ def attention_after_rope(q, k, v, pe, mode):
 diff --git a/diffusers/src/diffusers/pipelines/realrestorer/pipeline_realrestorer.py b/diffusers/src/diffusers/pipelines/realrestorer/pipeline_realrestorer.py
 index 3ed21ab..5734476 100644
 --- a/diffusers/src/diffusers/pipelines/realrestorer/pipeline_realrestorer.py
