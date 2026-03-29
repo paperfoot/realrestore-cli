@@ -54,9 +54,25 @@ enum Commands {
         #[arg(long, default_value_t = 42)]
         seed: u64,
 
+        /// Quality preset (overrides steps)
+        #[arg(long)]
+        quality: Option<String>,
+
         /// Custom prompt (overrides task prompt)
         #[arg(long)]
         prompt: Option<String>,
+
+        /// Enable tiling for high-resolution images
+        #[arg(long)]
+        tile: bool,
+
+        /// Tile size in pixels (default: 512)
+        #[arg(long, default_value_t = 512)]
+        tile_size: u32,
+
+        /// Tile overlap in pixels (default: 64)
+        #[arg(long, default_value_t = 64)]
+        tile_overlap: u32,
     },
 
     /// Remove invisible AI watermarks from an image
@@ -489,8 +505,15 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Restore { input, output, task, backend, quantize, steps, seed, prompt } => {
-            cmd_restore(&cli, input, output, task, backend, quantize, *steps, *seed, prompt);
+        Commands::Restore { input, output, task, backend, quantize, steps, seed, quality, prompt, tile, tile_size, tile_overlap } => {
+            // Quality presets override steps
+            let effective_steps = match quality.as_deref() {
+                Some("fast") => 8,
+                Some("balanced") => 14,
+                Some("high") => 28,
+                _ => *steps,
+            };
+            cmd_restore(&cli, input, output, task, backend, quantize, effective_steps, *seed, prompt);
         }
         Commands::WatermarkRemove { input, output, method } => {
             cmd_watermark_remove(&cli, input, output, method);
