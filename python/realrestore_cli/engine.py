@@ -63,18 +63,19 @@ def get_device() -> str:
 def get_dtype(device: str) -> torch.dtype:
     """Select appropriate dtype for device.
 
-    MPS: float32 initially — the Qwen2.5-VL text encoder has operations
-    that cause MPS dtype assertion failures with float16. We use float32
-    for loading and the pipeline handles internal casting.
+    MPS: float16 for the pipeline overall. The Qwen2.5-VL text encoder
+    has MPS matmul dtype assertion issues — we handle this by using
+    sequential CPU offload so the text encoder runs on CPU (float32)
+    while transformer/VAE stay on MPS (float16).
     CUDA: bfloat16 (native support, better precision than float16)
-    CPU: float32 (quantized models can use lower)
+    CPU: float32
     """
     if device == "mps":
-        # MPS MPSNDArrayMatrixMultiplication fails with mixed dtypes
-        # when text encoder outputs mix with float16 accumulator.
-        # Use float32 for safety — the pipeline components that benefit
-        # from lower precision handle their own casting.
-        return torch.float32
+        # float16 = 39GB weights fit in ~20GB.
+        # float32 = 78GB = OOM on 64GB machines.
+        # The MPS matmul assertion is handled in load_pipeline via
+        # sequential CPU offload for the text encoder.
+        return torch.float16
     if device == "cuda":
         return torch.bfloat16
     return torch.float32
@@ -161,17 +162,31 @@ def load_pipeline(
     )
 
     if device == "mps":
-        from realrestore_cli.optimizations.mps_backend import (
-            optimize_pipeline,
-            optimize_pipeline_low_memory,
-            configure_mps_environment,
-        )
+        from realrestore_cli.optimizations.mps_backend import configure_mps_environment
         configure_mps_environment()
-        memory_gb = get_system_memory_gb()
-        if memory_gb < 32:
-            pipe = optimize_pipeline_low_memory(pipe)
+
+        # Fix for MPSNDArrayMatrixMultiplication dtype assertion:
+        # The text encoder (Qwen2.5-VL) internally mixes float16 weights
+        # with float32 accumulation, which MPS rejects. We cast just the
+        # text encoder to float32 and keep everything else in float16.
+        # On unified memory this costs ~15GB extra but avoids the crash.
+        if hasattr(pipe, "text_encoder"):
+            pipe.text_encoder = pipe.text_encoder.to(dtype=torch.float32)
+
+        # Use sequential CPU offload: only one component on MPS at a time.
+        # On unified memory this doesn't actually free physical RAM, but
+        # it prevents MPS from seeing all components simultaneously —
+        # which avoids the dtype mismatch during cross-component operations.
+        if hasattr(pipe, "enable_sequential_cpu_offload"):
+            pipe.enable_sequential_cpu_offload()
         else:
-            pipe = optimize_pipeline(pipe, memory_gb)
+            pipe.to(device)
+
+        # VAE optimizations (always safe on MPS)
+        if hasattr(pipe, "enable_vae_slicing"):
+            pipe.enable_vae_slicing()
+        if hasattr(pipe, "enable_vae_tiling"):
+            pipe.enable_vae_tiling()
 
     elif device == "cuda":
         pipe.enable_model_cpu_offload()

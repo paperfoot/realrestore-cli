@@ -4,8 +4,10 @@ Key findings from research (2026-03-29):
 - torch.compile on MPS is NOT ready for diffusion models (use eager mode)
 - Attention slicing HURTS on 64GB M4 Max (trades speed for memory we don't need)
 - SDPA is available and beneficial on MPS (PyTorch 2.5+)
-- Float16 is the correct dtype (MPS bfloat16 upcast is slower)
-- On unified memory, CPU offloading adds overhead without saving memory
+- Float16 is the correct dtype for transformer/VAE (MPS bfloat16 upcast is slower)
+- Text encoder (Qwen2.5-VL) must be float32 to avoid MPS matmul assertion
+- Sequential CPU offload needed to prevent MPS cross-component dtype clash
+- On unified memory, CPU offload doesn't free physical RAM but isolates components
 - PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 unlocks full memory
 - Avoid CPU/GPU synchronization during inference loop
 - Safetensors mmap gives near-instant model loading on unified memory
