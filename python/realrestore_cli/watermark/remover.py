@@ -128,19 +128,141 @@ def remove_dwt(
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
+def remove_dct(
+    image: np.ndarray,
+    strength: float = 0.5,
+    block_size: int = 8,
+) -> np.ndarray:
+    """Remove watermarks using block DCT coefficient quantization.
+
+    Watermarks embedded in the DCT domain typically modify mid-frequency
+    coefficients within 8x8 blocks (the same structure used by JPEG).
+    This method applies soft quantization to those coefficients, disrupting
+    the watermark while preserving low-frequency image content.
+
+    Args:
+        image: Input image array (H, W, C) in [0, 255].
+        strength: Removal strength 0.0-1.0.  Higher values quantize more
+                  aggressively, removing more watermark energy at the cost
+                  of potential block artifacts.
+        block_size: DCT block size (default 8, matching JPEG).
+    """
+    from scipy.fft import dctn, idctn
+
+    result = np.zeros_like(image, dtype=np.float64)
+
+    # Quantization factor — maps strength to an effective divisor.
+    # strength=0 → quant=1 (no change), strength=1 → quant=0.3 (heavy)
+    quant_factor = max(0.3, 1.0 - strength * 0.7)
+
+    for c in range(image.shape[2] if len(image.shape) == 3 else 1):
+        channel = (image[:, :, c] if len(image.shape) == 3 else image).astype(np.float64)
+        h, w = channel.shape
+
+        # Pad to a multiple of block_size
+        pad_h = (block_size - h % block_size) % block_size
+        pad_w = (block_size - w % block_size) % block_size
+        padded = np.pad(channel, ((0, pad_h), (0, pad_w)), mode="reflect")
+
+        for i in range(0, padded.shape[0], block_size):
+            for j in range(0, padded.shape[1], block_size):
+                block = padded[i : i + block_size, j : j + block_size]
+                dct_block = dctn(block, type=2, norm="ortho")
+
+                # Quantize mid-frequency coefficients (freq index 3–10)
+                for u in range(block_size):
+                    for v in range(block_size):
+                        freq = u + v
+                        if 3 <= freq <= 10:
+                            dct_block[u, v] = (
+                                np.round(dct_block[u, v] * quant_factor) / quant_factor
+                            )
+
+                padded[i : i + block_size, j : j + block_size] = idctn(
+                    dct_block, type=2, norm="ortho"
+                )
+
+        if len(image.shape) == 3:
+            result[:, :, c] = padded[:h, :w]
+        else:
+            result = padded[:h, :w]
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def remove_adversarial_purification(
+    image: np.ndarray,
+    noise_strength: float = 0.15,
+) -> np.ndarray:
+    """Remove watermarks via adversarial purification (forward + reverse diffusion).
+
+    Adds controlled Gaussian noise (simulating a partial forward diffusion
+    step) to disrupt the watermark pattern, then denoises to recover a
+    clean image.  The amount of noise controls the trade-off between
+    watermark destruction and image preservation.
+
+    For heavy watermarks, use ``noise_strength`` around 0.25-0.35.
+    For light / unknown watermarks, 0.10-0.15 typically suffices.
+
+    The denoising stage uses a non-local-means style bilateral filter
+    rather than a full diffusion model so the method works without GPU
+    or model weights.
+
+    Args:
+        image: Input image array (H, W, C) in [0, 255].
+        noise_strength: Fraction of the pixel range [0, 255] used as the
+                        noise standard deviation.  0.0 = no noise, 1.0 =
+                        full-range noise (extremely destructive).
+    """
+    from scipy.ndimage import gaussian_filter
+
+    img_f = image.astype(np.float64)
+
+    # --- Forward step: add controlled noise ---
+    sigma = noise_strength * 255.0
+    rng = np.random.default_rng(seed=42)
+    noise = rng.normal(0.0, sigma, img_f.shape)
+    noisy = img_f + noise
+
+    # --- Reverse step: denoise ---
+    # Two-pass approach: Gaussian smoothing followed by an edge-aware
+    # weighted blend with the noisy input to preserve sharpness.
+    smooth_sigma = max(0.8, noise_strength * 4.0)
+    smoothed = np.zeros_like(noisy)
+    for c in range(noisy.shape[2] if len(noisy.shape) == 3 else 1):
+        ch = noisy[:, :, c] if len(noisy.shape) == 3 else noisy
+        smoothed_ch = gaussian_filter(ch, sigma=smooth_sigma)
+
+        # Edge-aware blend: keep sharp details where local variance is high
+        local_var = gaussian_filter((ch - smoothed_ch) ** 2, sigma=smooth_sigma * 2)
+        # Normalize weight so that high-variance (edge) areas keep more
+        # of the noisy signal, low-variance (flat) areas take the smooth.
+        weight = np.clip(local_var / (np.percentile(local_var, 95) + 1e-6), 0, 1)
+        blended = weight * ch + (1.0 - weight) * smoothed_ch
+
+        if len(noisy.shape) == 3:
+            smoothed[:, :, c] = blended
+        else:
+            smoothed = blended
+
+    return np.clip(smoothed, 0, 255).astype(np.uint8)
+
+
 def remove_ensemble(
     image: np.ndarray,
     strength: float = 0.5,
 ) -> np.ndarray:
     """Ensemble watermark removal combining multiple techniques.
 
-    Weighted combination of spectral and DWT methods for robust removal.
+    Weighted combination of spectral, DWT, and DCT methods for robust
+    removal across different watermark embedding domains.
     """
     spectral_result = remove_spectral(image, strength).astype(np.float64)
     dwt_result = remove_dwt(image, strength).astype(np.float64)
+    dct_result = remove_dct(image, strength).astype(np.float64)
 
-    # Weighted blend — DWT is generally better for structured watermarks
-    result = 0.4 * spectral_result + 0.6 * dwt_result
+    # Weighted blend — each method targets different embedding domains
+    result = 0.35 * spectral_result + 0.40 * dwt_result + 0.25 * dct_result
 
     return np.clip(result, 0, 255).astype(np.uint8)
 

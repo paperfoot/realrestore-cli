@@ -354,28 +354,81 @@ def detect_metadata_watermark(image_path: str) -> dict[str, Any]:
     return results
 
 
+def compute_quality_metrics(
+    original: np.ndarray,
+    processed: np.ndarray,
+) -> dict[str, float]:
+    """Compute before/after quality metrics.
+
+    Returns PSNR between *original* and *processed*, and watermark
+    detection scores for both images so the caller can assess how
+    much watermark energy was removed.
+    """
+    # PSNR
+    orig_f = original.astype(np.float64)
+    proc_f = processed.astype(np.float64)
+    mse = np.mean((orig_f - proc_f) ** 2)
+    if mse < 1e-10:
+        psnr = float("inf")
+    else:
+        psnr = 10.0 * np.log10(255.0 ** 2 / mse)
+
+    # Watermark detection scores (spectral anomaly) for both images
+    orig_spectral = analyze_frequency_domain(original)
+    proc_spectral = analyze_frequency_domain(processed)
+
+    orig_stega = detect_stegastamp(original)
+    proc_stega = detect_stegastamp(processed)
+
+    orig_tree = detect_tree_ring(original)
+    proc_tree = detect_tree_ring(processed)
+
+    return {
+        "psnr": round(psnr, 2),
+        "original_spectral_anomaly": round(orig_spectral["anomaly_score"], 4),
+        "processed_spectral_anomaly": round(proc_spectral["anomaly_score"], 4),
+        "original_stegastamp_score": round(orig_stega["score"], 4),
+        "processed_stegastamp_score": round(proc_stega["score"], 4),
+        "original_tree_ring_score": round(orig_tree["score"], 4),
+        "processed_tree_ring_score": round(proc_tree["score"], 4),
+    }
+
+
 def detect_watermarks(image_path: str) -> dict[str, Any]:
-    """Run all watermark detection methods on an image."""
+    """Run all watermark detection methods on an image.
+
+    Performs spectral analysis, DWT coefficient analysis, StegaStamp
+    frequency-pattern matching, Tree-Ring spectral ring analysis, and
+    metadata / C2PA inspection.  Returns per-method results and an
+    overall likelihood score.
+    """
     img = np.array(Image.open(image_path).convert("RGB")).astype(np.float64)
 
-    results = {
+    results: dict[str, Any] = {
         "image": image_path,
         "spectral": analyze_frequency_domain(img),
         "metadata": detect_metadata_watermark(image_path),
+        "stegastamp": detect_stegastamp(img),
+        "tree_ring": detect_tree_ring(img),
     }
 
     # Try DWT if available
     dwt_result = detect_dwt_watermark(img)
     results["dwt"] = dwt_result
 
-    # Overall assessment
+    # Overall assessment — weighted combination of detector scores
     scores = [results["spectral"]["anomaly_score"]]
     if dwt_result.get("available"):
         scores.append(min(1.0, dwt_result["anomaly_score"] / 5.0))
+    scores.append(results["stegastamp"]["score"])
+    scores.append(results["tree_ring"]["score"])
 
     results["overall_score"] = float(np.mean(scores))
     results["likely_watermarked"] = (
-        results["overall_score"] > 0.3 or results["metadata"]["has_watermark"]
+        results["overall_score"] > 0.3
+        or results["metadata"]["has_watermark"]
+        or results["stegastamp"]["likely"]
+        or results["tree_ring"]["likely"]
     )
 
     return results
