@@ -1,11 +1,17 @@
 """Core inference engine for RealRestore CLI.
 
 Orchestrates model loading, device selection, and inference with
-progressive optimization layers (MPS, quantization, MLX, ANE).
+research-backed optimization layers (MPS, quantization, MLX, ANE).
+
+Design decisions informed by research (2026-03-29):
+- MPS eager mode (torch.compile not ready for diffusion on MPS)
+- Float16 dtype (bfloat16 silently upcast on MPS = slower)
+- No attention slicing on 64GB (trades speed for unneeded memory savings)
+- No CPU offloading on unified memory (zero benefit, adds overhead)
+- Safetensors mmap for near-instant model loading
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -50,9 +56,14 @@ def get_device() -> str:
 
 
 def get_dtype(device: str) -> torch.dtype:
-    """Select appropriate dtype for device."""
+    """Select appropriate dtype for device.
+
+    MPS: float16 (bfloat16 gets silently upcast to float32, slower)
+    CUDA: bfloat16 (native support, better precision than float16)
+    CPU: float32 (quantized models can use lower)
+    """
     if device == "mps":
-        return torch.float16  # MPS doesn't fully support bfloat16
+        return torch.float16
     if device == "cuda":
         return torch.bfloat16
     return torch.float32
@@ -63,23 +74,53 @@ def get_model_path() -> str:
     env_path = os.environ.get("REALRESTORE_MODEL_PATH")
     if env_path:
         return env_path
-    # Default: HuggingFace model ID
     return "RealRestorer/RealRestorer"
+
+
+def get_system_memory_gb() -> float:
+    """Get system memory in GB."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip()) / (1024 ** 3)
+    except Exception:
+        pass
+    return 64.0  # Default assumption
 
 
 def get_peak_memory_mb(device: str) -> float:
     """Get peak memory usage in MB."""
     if device == "mps":
-        # MPS doesn't have built-in memory tracking like CUDA
         try:
             if hasattr(torch.mps, "driver_allocated_memory"):
                 return torch.mps.driver_allocated_memory() / 1024 / 1024
-            return 0.0
         except Exception:
+            pass
+        # Fallback to psutil for unified memory tracking
+        try:
+            import psutil
+            return psutil.Process().memory_info().rss / 1024 / 1024
+        except ImportError:
             return 0.0
     if device == "cuda":
         return torch.cuda.max_memory_allocated() / 1024 / 1024
     return 0.0
+
+
+def _setup_sys_path() -> None:
+    """Add upstream diffusers and RealRestorer to sys.path."""
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    local_diffusers = repo_root / "upstream-realrestorer" / "diffusers" / "src"
+    if local_diffusers.is_dir() and str(local_diffusers) not in sys.path:
+        sys.path.insert(0, str(local_diffusers))
+
+    upstream_root = repo_root / "upstream-realrestorer"
+    if upstream_root.is_dir() and str(upstream_root) not in sys.path:
+        sys.path.insert(0, str(upstream_root))
 
 
 def load_pipeline(
@@ -88,68 +129,85 @@ def load_pipeline(
     dtype: torch.dtype,
     quantize: str = "none",
 ) -> Any:
-    """Load the RealRestorer pipeline with optimizations."""
-    # Add upstream diffusers to path if available
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    local_diffusers = repo_root / "upstream-realrestorer" / "diffusers" / "src"
-    if local_diffusers.is_dir() and str(local_diffusers) not in sys.path:
-        sys.path.insert(0, str(local_diffusers))
-
-    # Also add the upstream repo root for RealRestorer module
-    upstream_root = repo_root / "upstream-realrestorer"
-    if upstream_root.is_dir() and str(upstream_root) not in sys.path:
-        sys.path.insert(0, str(upstream_root))
-
+    """Load the RealRestorer pipeline with device-appropriate optimizations."""
+    _setup_sys_path()
     from diffusers import RealRestorerPipeline
 
     pipe = RealRestorerPipeline.from_pretrained(
         model_path,
         torch_dtype=dtype,
+        use_safetensors=True,  # Mmap on unified memory = fast loading
     )
 
-    # Apply memory optimizations
     if device == "mps":
-        # Enable attention slicing for memory efficiency
-        if hasattr(pipe, "enable_attention_slicing"):
-            pipe.enable_attention_slicing()
-        # Enable VAE slicing
-        if hasattr(pipe, "enable_vae_slicing"):
-            pipe.enable_vae_slicing()
-        pipe.to(device)
+        from realrestore_cli.optimizations.mps_backend import (
+            optimize_pipeline,
+            optimize_pipeline_low_memory,
+            configure_mps_environment,
+        )
+        configure_mps_environment()
+        memory_gb = get_system_memory_gb()
+        if memory_gb < 32:
+            pipe = optimize_pipeline_low_memory(pipe)
+        else:
+            pipe = optimize_pipeline(pipe, memory_gb)
+
     elif device == "cuda":
         pipe.enable_model_cpu_offload()
+
     else:
         pipe.to(device)
 
     # Apply quantization if requested
     if quantize == "int8":
-        _apply_int8_quantization(pipe)
+        _apply_int8_quantization(pipe, device)
     elif quantize == "int4":
-        _apply_int4_quantization(pipe)
+        _apply_int4_quantization(pipe, device)
 
     return pipe
 
 
-def _apply_int8_quantization(pipe: Any) -> None:
-    """Apply dynamic int8 quantization to transformer blocks."""
+def _apply_int8_quantization(pipe: Any, device: str) -> None:
+    """Apply int8 quantization using Quanto (research-recommended for MPS)."""
     try:
-        import torch.ao.quantization as quant
-        # Dynamic quantization on linear layers
-        for name, module in pipe.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                quant.quantize_dynamic(
-                    module, {torch.nn.Linear}, dtype=torch.qint8
-                )
-    except Exception:
-        pass  # Graceful fallback if quantization fails
+        from optimum.quanto import freeze, qint8, quantize
+
+        # Quantize only the heavy transformer/UNet components
+        # Keep VAE at full precision (critical for output quality)
+        if hasattr(pipe, "transformer"):
+            quantize(pipe.transformer, weights=qint8)
+            freeze(pipe.transformer)
+        elif hasattr(pipe, "unet"):
+            quantize(pipe.unet, weights=qint8)
+            freeze(pipe.unet)
+    except ImportError:
+        # Fallback to PyTorch native quantization
+        try:
+            if device == "cpu":
+                # Dynamic quantization only works well on CPU
+                for name in ["unet", "transformer"]:
+                    if hasattr(pipe, name):
+                        module = getattr(pipe, name)
+                        quantized = torch.ao.quantization.quantize_dynamic(
+                            module, {torch.nn.Linear}, dtype=torch.qint8
+                        )
+                        setattr(pipe, name, quantized)
+        except Exception:
+            pass
 
 
-def _apply_int4_quantization(pipe: Any) -> None:
-    """Apply int4 quantization (requires bitsandbytes or similar)."""
+def _apply_int4_quantization(pipe: Any, device: str) -> None:
+    """Apply int4 quantization using Quanto or torchao."""
     try:
-        # Will be implemented with bitsandbytes or custom quantization
-        pass
-    except Exception:
+        from optimum.quanto import freeze, qint4, quantize
+
+        if hasattr(pipe, "transformer"):
+            quantize(pipe.transformer, weights=qint4)
+            freeze(pipe.transformer)
+        elif hasattr(pipe, "unet"):
+            quantize(pipe.unet, weights=qint4)
+            freeze(pipe.unet)
+    except ImportError:
         pass
 
 
@@ -168,7 +226,7 @@ def restore_image(
 
     # Resolve device
     if backend == "auto":
-        device = get_device()
+        device = os.environ.get("REALRESTORE_BACKEND", get_device())
     else:
         device = backend
 
@@ -186,15 +244,28 @@ def restore_image(
     image = Image.open(input_path).convert("RGB")
 
     # Run inference
-    result = pipe(
-        image=image,
-        prompt=prompt,
-        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-        num_inference_steps=steps,
-        guidance_scale=3.0,
-        seed=seed,
-        size_level=1024,
-    )
+    if device == "mps":
+        from realrestore_cli.optimizations.mps_backend import synchronize
+        result = pipe(
+            image=image,
+            prompt=prompt,
+            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            num_inference_steps=steps,
+            guidance_scale=3.0,
+            seed=seed,
+            size_level=1024,
+        )
+        synchronize()  # Sync only at end for accurate timing
+    else:
+        result = pipe(
+            image=image,
+            prompt=prompt,
+            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            num_inference_steps=steps,
+            guidance_scale=3.0,
+            seed=seed,
+            size_level=1024,
+        )
 
     # Save output
     out_path = Path(output_path)
@@ -218,7 +289,8 @@ def restore_image(
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
