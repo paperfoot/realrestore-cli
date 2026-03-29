@@ -239,7 +239,7 @@ fn run_python(cli: &Cli, module: &str, args: &[&str]) -> Result<serde_json::Valu
 // ── Commands ─────────────────────────────────────────────────────────
 
 fn cmd_restore(cli: &Cli, input: &PathBuf, output: &Option<PathBuf>, task: &str, backend: &str, quantize: &str, steps: u32, seed: u64, prompt: &Option<String>) {
-    let input_str = input.to_string_lossy();
+    let input_str = input.to_string_lossy().to_string();
     if !input.exists() {
         print_error(cli, "invalid_input", &format!("File not found: {input_str}"), "Check the file path and try again.");
     }
@@ -249,25 +249,26 @@ fn cmd_restore(cli: &Cli, input: &PathBuf, output: &Option<PathBuf>, task: &str,
         let ext = input.extension().unwrap_or_default().to_string_lossy();
         input.with_file_name(format!("{stem}_restored.{ext}"))
     });
+    let out_str = out_path.to_string_lossy().to_string();
 
     if !use_json(cli) {
-        println!("{} {}", "Restoring".green().bold(), input_str);
+        println!("{} {}", "Restoring".green().bold(), &input_str);
         println!("  Task: {task}  Backend: {backend}  Steps: {steps}");
     }
 
     let prompt_str = prompt.as_deref().unwrap_or("");
-    let args: Vec<&str> = vec![
+    let steps_str = steps.to_string();
+    let seed_str = seed.to_string();
+    let arg_strs: Vec<&str> = vec![
         "--input", &input_str,
-        "--output", &out_path.to_string_lossy(),
+        "--output", &out_str,
         "--task", task,
         "--backend", backend,
         "--quantize", quantize,
-        "--steps", &steps.to_string(),
-        "--seed", &seed.to_string(),
+        "--steps", &steps_str,
+        "--seed", &seed_str,
         "--prompt", prompt_str,
     ];
-    // Convert to &str slice for run_python
-    let arg_strs: Vec<&str> = args.iter().copied().collect();
 
     match run_python(cli, "realrestore_cli.engine", &arg_strs) {
         Ok(result) => {
@@ -285,7 +286,7 @@ fn cmd_restore(cli: &Cli, input: &PathBuf, output: &Option<PathBuf>, task: &str,
 }
 
 fn cmd_watermark_remove(cli: &Cli, input: &PathBuf, output: &Option<PathBuf>, method: &str) {
-    let input_str = input.to_string_lossy();
+    let input_str = input.to_string_lossy().to_string();
     if !input.exists() {
         print_error(cli, "invalid_input", &format!("File not found: {input_str}"), "Check the file path and try again.");
     }
@@ -297,12 +298,11 @@ fn cmd_watermark_remove(cli: &Cli, input: &PathBuf, output: &Option<PathBuf>, me
     });
 
     if !use_json(cli) {
-        println!("{} {}", "Removing watermarks from".cyan().bold(), input_str);
+        println!("{} {}", "Removing watermarks from".cyan().bold(), &input_str);
     }
 
     let out_str = out_path.to_string_lossy().to_string();
-    let args = vec!["--input", &input_str, "--output", &out_str, "--method", method];
-    let arg_strs: Vec<&str> = args.iter().copied().collect();
+    let arg_strs: Vec<&str> = vec!["--input", &input_str, "--output", &out_str, "--method", method];
 
     match run_python(cli, "realrestore_cli.watermark.remover", &arg_strs) {
         Ok(result) => {
@@ -319,13 +319,11 @@ fn cmd_benchmark(cli: &Cli, iterations: u32, backends: &str, image: &Option<Path
     }
 
     let iter_str = iterations.to_string();
-    let mut args = vec!["--iterations", &iter_str, "--backends", backends];
-    let img_str;
-    if let Some(img) = image {
-        img_str = img.to_string_lossy().to_string();
-        args.extend(["--image", &img_str]);
+    let img_str = image.as_ref().map(|p| p.to_string_lossy().to_string());
+    let mut arg_strs: Vec<&str> = vec!["--iterations", &iter_str, "--backends", backends];
+    if let Some(ref s) = img_str {
+        arg_strs.extend(["--image", s.as_str()]);
     }
-    let arg_strs: Vec<&str> = args.iter().copied().collect();
 
     match run_python(cli, "realrestore_cli.benchmarks.runner", &arg_strs) {
         Ok(result) => {
@@ -355,7 +353,7 @@ fn cmd_benchmark(cli: &Cli, iterations: u32, backends: &str, image: &Option<Path
     }
 }
 
-fn cmd_agent_info(cli: &Cli) {
+fn cmd_agent_info(_cli: &Cli) {
     let info = serde_json::json!({
         "name": "realrestore",
         "version": VERSION,
