@@ -23,6 +23,11 @@ from typing import Any
 import torch
 from PIL import Image
 
+# Module-level pipeline cache — avoids reloading 39GB model on every call
+# Key: (model_path, device, dtype, quantize)
+_pipeline_cache: dict[tuple, Any] = {}
+_cache_key: tuple | None = None
+
 # Task prompt mapping
 TASK_PROMPTS: dict[str, str] = {
     "auto": "Restore the details and keep the original composition.",
@@ -129,7 +134,17 @@ def load_pipeline(
     dtype: torch.dtype,
     quantize: str = "none",
 ) -> Any:
-    """Load the RealRestorer pipeline with device-appropriate optimizations."""
+    """Load the RealRestorer pipeline with device-appropriate optimizations.
+
+    Uses module-level caching to avoid reloading 39GB of weights on
+    repeated calls (critical for benchmark loops and agent workflows).
+    """
+    global _pipeline_cache, _cache_key
+
+    cache_key = (model_path, device, str(dtype), quantize)
+    if cache_key in _pipeline_cache:
+        return _pipeline_cache[cache_key]
+
     _setup_sys_path()
     from diffusers import RealRestorerPipeline
 
@@ -163,6 +178,10 @@ def load_pipeline(
         _apply_int8_quantization(pipe, device)
     elif quantize == "int4":
         _apply_int4_quantization(pipe, device)
+
+    # Cache the loaded pipeline
+    _pipeline_cache[cache_key] = pipe
+    _cache_key = cache_key
 
     return pipe
 

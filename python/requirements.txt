@@ -15,6 +15,7 @@ einops>=0.8.0
 huggingface_hub>=0.30.0
 
 # Optimization dependencies
+optimum-quanto>=0.2.0
 bitsandbytes>=0.45.0; sys_platform != "darwin"
 
 # Watermark detection
