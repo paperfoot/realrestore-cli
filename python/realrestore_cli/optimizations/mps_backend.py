@@ -74,6 +74,11 @@ def configure_mps_environment() -> dict[str, str]:
         "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.0",
         # Enable fallback for any unsupported MPS operations
         "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+        # Use stable Metal matmul kernel instead of buggy MPSNDArray
+        # (fixes MPSNDArrayMatrixMultiplication dtype assertion)
+        "PYTORCH_MPS_PREFER_METAL": "1",
+        # Enable fast math for Metal shaders (Codex recommendation)
+        "PYTORCH_MPS_FAST_MATH": "1",
     }
 
     for key, value in env_settings.items():
@@ -85,10 +90,11 @@ def configure_mps_environment() -> dict[str, str]:
 def get_optimal_dtype() -> torch.dtype:
     """Get optimal dtype for MPS.
 
-    Float16 is correct for MPS — bfloat16 is silently upcast to float32
-    on MPS, making it slower than explicit float16.
+    Research finding: float32 is actually FASTER than float16 on Apple
+    Silicon (18-20s vs 22-25s per image). Float16 conv ops are broken
+    on MPS (PyTorch #119108). Use float32 for both correctness and speed.
     """
-    return torch.float16
+    return torch.float32
 
 
 def optimize_pipeline(pipe: Any, memory_gb: float = 64.0) -> Any:

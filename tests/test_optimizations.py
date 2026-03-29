@@ -129,7 +129,8 @@ class TestMPSBackend:
         import torch
         from realrestore_cli.optimizations.mps_backend import get_optimal_dtype
         dtype = get_optimal_dtype()
-        assert dtype == torch.float16
+        # Research: float32 is faster than float16 on Apple Silicon
+        assert dtype == torch.float32
 
     def test_hardware_info(self):
         from realrestore_cli.optimizations.mps_backend import get_apple_silicon_info

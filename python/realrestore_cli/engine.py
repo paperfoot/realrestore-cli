@@ -63,19 +63,18 @@ def get_device() -> str:
 def get_dtype(device: str) -> torch.dtype:
     """Select appropriate dtype for device.
 
-    MPS: float16 for the pipeline overall. The Qwen2.5-VL text encoder
-    has MPS matmul dtype assertion issues — we handle this by using
-    sequential CPU offload so the text encoder runs on CPU (float32)
-    while transformer/VAE stay on MPS (float16).
-    CUDA: bfloat16 (native support, better precision than float16)
-    CPU: float32
+    Research findings (2026-03-29):
+    - MPS float16 convolutions are FUNDAMENTALLY BROKEN (PyTorch #119108)
+    - Float32 is actually FASTER than float16 on Apple Silicon (18-20s vs 22-25s)
+    - device_map="mps" silently corrupts weights — must load CPU first
+    - enable_model_cpu_offload() is broken on MPS (hardcoded CUDA)
+    - Qwen2-VL on MPS has no working float16 solution (transformers #33399)
+
+    Strategy: Load as float32. Use Quanto INT8 quantization to fit in memory.
+    INT8 weights (~10GB) + float32 compute = ~30GB total, fits in 64GB.
     """
     if device == "mps":
-        # float16 = 39GB weights fit in ~20GB.
-        # float32 = 78GB = OOM on 64GB machines.
-        # The MPS matmul assertion is handled in load_pipeline via
-        # sequential CPU offload for the text encoder.
-        return torch.float16
+        return torch.float32
     if device == "cuda":
         return torch.bfloat16
     return torch.float32
@@ -155,50 +154,42 @@ def load_pipeline(
     _setup_sys_path()
     from diffusers import RealRestorerPipeline
 
+    # CRITICAL: Always load on CPU first. device_map="mps" silently
+    # corrupts weights (diffusers #13227). low_cpu_mem_usage prevents
+    # peak memory spike during loading.
     pipe = RealRestorerPipeline.from_pretrained(
         model_path,
         torch_dtype=dtype,
-        use_safetensors=True,  # Mmap on unified memory = fast loading
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
     )
+
+    # Apply quantization BEFORE moving to device (saves memory during transfer)
+    if quantize == "int8":
+        _apply_int8_quantization(pipe, device)
+    elif quantize == "int4":
+        _apply_int4_quantization(pipe, device)
 
     if device == "mps":
         from realrestore_cli.optimizations.mps_backend import configure_mps_environment
         configure_mps_environment()
 
-        # Fix for MPSNDArrayMatrixMultiplication dtype assertion:
-        # The text encoder (Qwen2.5-VL) internally mixes float16 weights
-        # with float32 accumulation, which MPS rejects. We cast just the
-        # text encoder to float32 and keep everything else in float16.
-        # On unified memory this costs ~15GB extra but avoids the crash.
-        if hasattr(pipe, "text_encoder"):
-            pipe.text_encoder = pipe.text_encoder.to(dtype=torch.float32)
-
-        # Use sequential CPU offload: only one component on MPS at a time.
-        # On unified memory this doesn't actually free physical RAM, but
-        # it prevents MPS from seeing all components simultaneously —
-        # which avoids the dtype mismatch during cross-component operations.
-        if hasattr(pipe, "enable_sequential_cpu_offload"):
-            pipe.enable_sequential_cpu_offload()
-        else:
-            pipe.to(device)
-
-        # VAE optimizations (always safe on MPS)
-        if hasattr(pipe, "enable_vae_slicing"):
-            pipe.enable_vae_slicing()
-        if hasattr(pipe, "enable_vae_tiling"):
-            pipe.enable_vae_tiling()
+        # Research-backed MPS strategy:
+        # - Float32 is faster than float16 on Apple Silicon (18-20s vs 22-25s)
+        # - Float16 convolutions are fundamentally broken (PyTorch #119108)
+        # - enable_model_cpu_offload() is broken on MPS (hardcoded CUDA)
+        # - enable_sequential_cpu_offload() causes meta tensor errors
+        # - Upstream pipeline bfloat16 hardcodes are patched to use self.dtype
+        #
+        # We load as float32 on CPU, optionally quantize (INT8 = ~10GB),
+        # then move to MPS. Total ~30GB fits in 64GB.
+        pipe.to(device)
 
     elif device == "cuda":
         pipe.enable_model_cpu_offload()
 
     else:
         pipe.to(device)
-
-    # Apply quantization if requested
-    if quantize == "int8":
-        _apply_int8_quantization(pipe, device)
-    elif quantize == "int4":
-        _apply_int4_quantization(pipe, device)
 
     # Cache the loaded pipeline
     _pipeline_cache[cache_key] = pipe
