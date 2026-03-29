@@ -63,12 +63,18 @@ def get_device() -> str:
 def get_dtype(device: str) -> torch.dtype:
     """Select appropriate dtype for device.
 
-    MPS: float16 (bfloat16 gets silently upcast to float32, slower)
+    MPS: float32 initially — the Qwen2.5-VL text encoder has operations
+    that cause MPS dtype assertion failures with float16. We use float32
+    for loading and the pipeline handles internal casting.
     CUDA: bfloat16 (native support, better precision than float16)
     CPU: float32 (quantized models can use lower)
     """
     if device == "mps":
-        return torch.float16
+        # MPS MPSNDArrayMatrixMultiplication fails with mixed dtypes
+        # when text encoder outputs mix with float16 accumulator.
+        # Use float32 for safety — the pipeline components that benefit
+        # from lower precision handle their own casting.
+        return torch.float32
     if device == "cuda":
         return torch.bfloat16
     return torch.float32
