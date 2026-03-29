@@ -285,13 +285,15 @@ def remove_watermark(
     """Remove invisible watermarks from an image.
 
     Args:
-        input_path: Path to input image
-        output_path: Path for cleaned output
-        method: Removal method (spectral, dwt, ensemble, diffusion)
-        strength: Removal strength 0.0-1.0
+        input_path: Path to input image.
+        output_path: Path for cleaned output.
+        method: Removal method — one of ``spectral``, ``dwt``, ``dct``,
+                ``adversarial``, ``ensemble``, or ``diffusion``.
+        strength: Removal strength 0.0-1.0.
 
     Returns:
-        Dictionary with metrics and status
+        Dictionary with quality metrics, watermark detection scores
+        before/after, and timing information.
     """
     start_time = time.time()
 
@@ -303,6 +305,10 @@ def remove_watermark(
         cleaned = remove_spectral(image_array, strength)
     elif method == "dwt":
         cleaned = remove_dwt(image_array, strength)
+    elif method == "dct":
+        cleaned = remove_dct(image_array, strength)
+    elif method == "adversarial":
+        cleaned = remove_adversarial_purification(image_array, noise_strength=strength)
     elif method == "ensemble":
         cleaned = remove_ensemble(image_array, strength)
     elif method == "diffusion":
@@ -323,8 +329,10 @@ def remove_watermark(
     # Also strip metadata
     strip_metadata(str(out_path), str(out_path))
 
-    # Compute quality metrics
-    psnr = _compute_psnr(image_array, cleaned)
+    # Compute quality metrics (PSNR + watermark detection before/after)
+    from realrestore_cli.watermark.detector import compute_quality_metrics
+
+    quality = compute_quality_metrics(image_array, cleaned)
 
     elapsed = time.time() - start_time
 
@@ -333,7 +341,15 @@ def remove_watermark(
         "output": str(out_path),
         "method": method,
         "strength": strength,
-        "psnr_vs_original": round(psnr, 2),
+        "psnr_vs_original": quality["psnr"],
+        "watermark_scores": {
+            "spectral_before": quality["original_spectral_anomaly"],
+            "spectral_after": quality["processed_spectral_anomaly"],
+            "stegastamp_before": quality["original_stegastamp_score"],
+            "stegastamp_after": quality["processed_stegastamp_score"],
+            "tree_ring_before": quality["original_tree_ring_score"],
+            "tree_ring_after": quality["processed_tree_ring_score"],
+        },
         "elapsed_seconds": round(elapsed, 2),
         "image_size": list(img.size),
     }
@@ -368,11 +384,16 @@ def _compute_psnr(original: np.ndarray, cleaned: np.ndarray) -> float:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--method", default="ensemble")
-    parser.add_argument("--strength", type=float, default=0.5)
+    parser = argparse.ArgumentParser(description="Remove invisible watermarks from images.")
+    parser.add_argument("--input", required=True, help="Path to input image")
+    parser.add_argument("--output", required=True, help="Path for cleaned output")
+    parser.add_argument(
+        "--method",
+        default="ensemble",
+        choices=["spectral", "dwt", "dct", "adversarial", "ensemble", "diffusion"],
+        help="Removal method (default: ensemble)",
+    )
+    parser.add_argument("--strength", type=float, default=0.5, help="Removal strength 0.0-1.0")
     return parser.parse_args()
 
 
