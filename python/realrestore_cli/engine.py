@@ -169,46 +169,14 @@ def load_pipeline(
 
 def _apply_int8_quantization(pipe: Any, device: str) -> None:
     """Apply int8 quantization using Quanto (research-recommended for MPS)."""
-    try:
-        from optimum.quanto import freeze, qint8, quantize
-
-        # Quantize only the heavy transformer/UNet components
-        # Keep VAE at full precision (critical for output quality)
-        if hasattr(pipe, "transformer"):
-            quantize(pipe.transformer, weights=qint8)
-            freeze(pipe.transformer)
-        elif hasattr(pipe, "unet"):
-            quantize(pipe.unet, weights=qint8)
-            freeze(pipe.unet)
-    except ImportError:
-        # Fallback to PyTorch native quantization
-        try:
-            if device == "cpu":
-                # Dynamic quantization only works well on CPU
-                for name in ["unet", "transformer"]:
-                    if hasattr(pipe, name):
-                        module = getattr(pipe, name)
-                        quantized = torch.ao.quantization.quantize_dynamic(
-                            module, {torch.nn.Linear}, dtype=torch.qint8
-                        )
-                        setattr(pipe, name, quantized)
-        except Exception:
-            pass
+    from realrestore_cli.optimizations.quantize import quantize_pipeline
+    quantize_pipeline(pipe, weights_dtype="int8", device=device)
 
 
 def _apply_int4_quantization(pipe: Any, device: str) -> None:
     """Apply int4 quantization using Quanto or torchao."""
-    try:
-        from optimum.quanto import freeze, qint4, quantize
-
-        if hasattr(pipe, "transformer"):
-            quantize(pipe.transformer, weights=qint4)
-            freeze(pipe.transformer)
-        elif hasattr(pipe, "unet"):
-            quantize(pipe.unet, weights=qint4)
-            freeze(pipe.unet)
-    except ImportError:
-        pass
+    from realrestore_cli.optimizations.quantize import quantize_pipeline
+    quantize_pipeline(pipe, weights_dtype="int4", device=device)
 
 
 def restore_image(
