@@ -104,6 +104,12 @@ enum Commands {
         image: Option<PathBuf>,
     },
 
+    /// Manage persistent inference daemon (keeps model in memory)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+
     /// Print machine-readable capability manifest
     AgentInfo,
 
@@ -128,6 +134,23 @@ enum Commands {
 enum SkillAction {
     /// Install skill files to agent directories
     Install,
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the inference daemon (keeps model in memory)
+    Start {
+        /// Inference backend
+        #[arg(short, long, default_value = "auto")]
+        backend: String,
+        /// Quantization level
+        #[arg(short, long, default_value = "none")]
+        quantize: String,
+    },
+    /// Stop the running daemon
+    Stop,
+    /// Check daemon status
+    Status,
 }
 
 // ── Output ───────────────────────────────────────────────────────────
@@ -369,6 +392,35 @@ fn cmd_benchmark(cli: &Cli, iterations: u32, backends: &str, image: &Option<Path
     }
 }
 
+fn cmd_daemon(cli: &Cli, action: &DaemonAction) {
+    let (subcommand, args) = match action {
+        DaemonAction::Start { backend, quantize } => {
+            ("start", vec!["--backend", backend.as_str(), "--quantize", quantize.as_str()])
+        }
+        DaemonAction::Stop => ("stop", vec![]),
+        DaemonAction::Status => ("status", vec![]),
+    };
+
+    let mut all_args = vec![subcommand];
+    all_args.extend(args);
+
+    match run_python(cli, "realrestore_cli.daemon", &all_args) {
+        Ok(result) => {
+            let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let human_msg = match status {
+                "started" => format!("{} Daemon started (PID: {})", "Running".green().bold(),
+                    result.get("pid").and_then(|v| v.as_i64()).unwrap_or(0)),
+                "already_running" => "Daemon is already running.".to_string(),
+                "stopping" => "Daemon stopping...".to_string(),
+                "not_running" => "Daemon is not running.".to_string(),
+                _ => format!("Daemon status: {status}"),
+            };
+            print_success(cli, result, &human_msg);
+        }
+        Err(e) => print_error(cli, "transient", &e, "Check Python environment: realrestore setup"),
+    }
+}
+
 fn cmd_agent_info(_cli: &Cli) {
     let info = serde_json::json!({
         "name": "realrestore",
@@ -521,6 +573,7 @@ fn main() {
         Commands::Benchmark { iterations, backends, image } => {
             cmd_benchmark(&cli, *iterations, backends, image);
         }
+        Commands::Daemon { action } => cmd_daemon(&cli, action),
         Commands::AgentInfo => cmd_agent_info(&cli),
         Commands::Skill { action } => match action {
             SkillAction::Install => cmd_skill_install(&cli),
