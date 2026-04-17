@@ -209,7 +209,7 @@ Multiple repos report "BFloat16 is not supported on MPS":
 ### Known Forks and Ports
 
 - **[StartHua/Comfyui_RealRestorer](https://github.com/StartHua/Comfyui_RealRestorer)** -- 7 stars, ComfyUI integration
-- **[199-biotechnologies/realrestore-cli](https://github.com/199-biotechnologies/realrestore-cli)** -- Our project, only known MPS port attempt
+- **[paperfoot/realrestore-cli](https://github.com/paperfoot/realrestore-cli)** -- Our project, only known MPS port attempt
 - **No other MPS-specific ports found anywhere on GitHub**
 
 ### Architecture Challenges for MPS

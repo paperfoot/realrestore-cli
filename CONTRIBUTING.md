@@ -6,7 +6,7 @@ Thanks for your interest in contributing. This guide covers everything you need 
 
 ```bash
 # Clone the repo
-git clone https://github.com/199-biotechnologies/realrestore-cli
+git clone https://github.com/paperfoot/realrestore-cli
 cd realrestore-cli
 
 # Build the Rust CLI
