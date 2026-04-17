@@ -153,7 +153,7 @@ Detects and removes invisible watermarks embedded by AI image generators:
 
 ### Agent-Friendly Design
 
-Built for AI coding agents following the [agent-cli-framework](https://github.com/199-biotechnologies/agent-cli-framework) patterns:
+Built for AI coding agents following the [agent-cli-framework](https://github.com/paperfoot/agent-cli-framework) patterns:
 
 ```bash
 # Self-describing capabilities
